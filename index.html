@@ -537,7 +537,7 @@ table.tkb { border-collapse: separate; border-spacing: 0; width: 100%; min-width
 // ▶ Dán URL Web App của Apps Script vào đây để cố định máy chủ khi đưa lên GitHub.
 //   Để trống: màn hình đăng nhập sẽ hỏi địa chỉ máy chủ (lưu trên trình duyệt).
 const API_URL_MAC_DINH = 'https://script.google.com/macros/s/AKfycbwz5xtB6DExuyAGdKu523NMPq-nUhk8wAe8RhDUyqST-IYRqIfTqHoH3SthSJa7_t-pXw/exec';
-const PHIEN_BAN = '1.2.0';
+const PHIEN_BAN = '1.2.1';
 
 /* ---------------- tiện ích chung ---------------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -848,9 +848,14 @@ async function docDocx(buf) {
           const pr = conTen(tc, 'tcPr')[0];
           const gs = pr && conTen(pr, 'gridSpan')[0];
           const span = gs ? parseInt(gs.getAttribute('w:val') || gs.getAttributeNS(gs.namespaceURI, 'val') || '1', 10) || 1 : 1;
+          const vm = pr && conTen(pr, 'vMerge')[0];
+          const noi = !!vm && (vm.getAttribute('w:val') || vm.getAttributeNS(vm.namespaceURI, 'val') || 'continue') !== 'restart';
           const text = conTen(tc, 'p').map(vanBanDoan).join('\n').trim();
-          return { text, span };
+          return { text, span, noi: noi && !text };
         }));
+        // ô gộp dọc (cột Tuần, Chủ đề… gộp nhiều dòng): các dòng dưới lấy chữ của ô đầu
+        const tren = [];
+        rows.forEach(r => { let cot = 0; r.forEach(c => { if (c.noi && tren[cot] != null) c.text = tren[cot]; else tren[cot] = c.text; cot += c.span || 1; }); });
         blocks.push({ type: 'tbl', rows });
       } else if (el.localName === 'sdt') { const c = conTen(el, 'sdtContent')[0]; if (c) duyet(c); }
     }
@@ -886,13 +891,20 @@ async function docXlsx(buf) {
         arr[ci] = { text: String(v).trim(), span: 1 };
       }
     }
-    // ô gộp: đặt span cho ô đầu dòng
+    // ô gộp: ô đầu mang span; ô gộp ngang bị che thì bỏ (không lệch cột); ô gộp dọc lấy chữ của ô đầu
+    const phu = new Set();
     for (const mc of hauDuTen(doc.documentElement, 'mergeCell')) {
       const [a, b] = mc.getAttribute('ref').split(':'); if (!b) continue;
-      const r1 = parseInt(a.replace(/[A-Z]+/, ''), 10) - 1, c1 = cotSo(a), c2 = cotSo(b);
-      const row = grid[r1]; if (row && row[c1]) row[c1].span = c2 - c1 + 1;
+      const r1 = parseInt(a.replace(/[A-Z]+/, ''), 10) - 1, r2 = parseInt(b.replace(/[A-Z]+/, ''), 10) - 1, c1 = cotSo(a), c2 = cotSo(b);
+      const dau = grid[r1] && grid[r1][c1]; const txt = dau ? dau.text : '';
+      for (let r = r1; r <= r2; r++) {
+        grid[r] = grid[r] || [];
+        grid[r][c1] = { text: (grid[r][c1] && grid[r][c1].text) || txt, span: c2 - c1 + 1 };
+        for (let c = c1 + 1; c <= c2; c++) phu.add(r + ',' + c);
+      }
     }
-    const rows = grid.filter(Boolean).map(r => { const out = []; for (let i = 0; i < r.length; i++) out[i] = r[i] || { text: '', span: 1 }; return out; });
+    const rows = [];
+    grid.forEach((r, ri) => { if (!r) return; const out = []; for (let i = 0; i < r.length; i++) { if (phu.has(ri + ',' + i)) continue; out.push(r[i] || { text: '', span: 1 }); } rows.push(out); });
     sheets.push({ name: sh.getAttribute('name'), rows });
   }
   return sheets;
@@ -1271,19 +1283,48 @@ function tachSo(s) {
   return out;
 }
 function chuanHoaTen(s) { return String(s || '').replace(/\s+/g, ' ').replace(/([^\s(])\(/g, '$1 (').replace(/\(\s+/g, '(').replace(/\s+\)/g, ')').trim(); }
+/** Tên bài viết IN HOA toàn bộ → viết thường, hoa chữ đầu, giữ số La Mã sau "kì/kỳ" (KIỂM TRA GIỮA HỌC KÌ I → Kiểm tra giữa học kì I) */
+function boInHoa(s) {
+  s = String(s || '');
+  if (!/\s/.test(s.trim()) || s !== s.toLocaleUpperCase('vi') || s === s.toLocaleLowerCase('vi')) return s;   // chữ viết tắt một từ (HĐTN) giữ nguyên
+  const t = s.toLocaleLowerCase('vi').replace(/(k[ìỳiy])\s+(ii|i)(?![\p{L}\d])/gu, (m, a, b) => a + ' ' + b.toUpperCase());
+  return t.charAt(0).toLocaleUpperCase('vi') + t.slice(1);
+}
+/** Tên chuẩn của các môn thường gặp (khi tên lấy từ tên file không dấu) */
+const TEN_MON_CHUAN = { 'tin hoc': 'Tin học', 'toan': 'Toán', 'ngu van': 'Ngữ văn', 'tieng anh': 'Tiếng Anh', 'khoa hoc tu nhien': 'Khoa học tự nhiên', 'khtn': 'Khoa học tự nhiên',
+  'lich su va dia li': 'Lịch sử và Địa lí', 'lich su va dia ly': 'Lịch sử và Địa lí', 'lich su': 'Lịch sử', 'dia li': 'Địa lí', 'dia ly': 'Địa lí', 'giao duc cong dan': 'Giáo dục công dân', 'gdcd': 'Giáo dục công dân',
+  'cong nghe': 'Công nghệ', 'am nhac': 'Âm nhạc', 'mi thuat': 'Mĩ thuật', 'my thuat': 'Mĩ thuật', 'giao duc the chat': 'Giáo dục thể chất', 'gdtc': 'Giáo dục thể chất', 'tri tue nhan tao': 'Trí tuệ nhân tạo',
+  'hoat dong trai nghiem huong nghiep': 'Hoạt động trải nghiệm, hướng nghiệp', 'hdtn': 'Hoạt động trải nghiệm, hướng nghiệp', 'giao duc dia phuong': 'Giáo dục địa phương', 'noi dung giao duc dia phuong': 'Giáo dục địa phương',
+  'vat li': 'Vật lí', 'vat ly': 'Vật lí', 'hoa hoc': 'Hóa học', 'sinh hoc': 'Sinh học' };
+/** "tin hoc 8" → "Tin học 8"; "Tiếng anh 6" → "Tiếng Anh 6" */
+function chuanTenMon(t) {
+  const m = String(t || '').replace(/\s+/g, ' ').trim().match(/^(.*?)[\s,\-–]*(\d{1,2})?$/);
+  const goc = (m[1] || '').trim(), so = m[2] || '';
+  const k = boDau(goc).replace(/[^a-z0-9]+/g, ' ').trim();
+  const ten = TEN_MON_CHUAN[k] || (goc ? goc.charAt(0).toLocaleUpperCase('vi') + goc.slice(1) : '');
+  return (ten + (so ? ' ' + so : '')).trim();
+}
+/** Tên môn từ tên file: "PPCT_Tin_hoc_8_V1.docx" → "Tin học 8" (bỏ PPCT, số phiên bản, năm học, "lớp") */
+function tenMonTuFile(tenFile) {
+  let t = String(tenFile || '').replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').replace(/(?<!\d)-|-(?!\d)/g, ' ').replace(/\s+/g, ' ').trim();
+  t = t.replace(/^(ppct|phân phối chương trình|phan phoi chuong trinh|kế hoạch dạy học|ke hoach day hoc|khdh)\b[\s\-–:]*/i, '');
+  for (let i = 0; i < 4; i++) t = t.replace(/[\s\-–]*(\(\d+\)|v\s?\d+(\.\d+)?|ver\s?\d+|b[ảa]n\s?\d+|final|copy|m[ớo]i|\d{4}\s*[-–]\s*\d{4}|n[ăa]m h[ọo]c.*)$/i, '').trim();
+  t = t.replace(/[\s,\-–]+(?:(?:kh[ốo]i|l[ớo]p)\s*)+(\d{1,2})$/i, ' $1');
+  return chuanTenMon(t);
+}
 function laHocKy(t) {
   const a = boDau(t); const m = a.match(/^(?:hoc ky|hoc ki|hk)\s*(ii|i|2|1)\b/);
   if (!m || /tuan\s*x|=/.test(a)) return null;
   return /ii|2/.test(m[1]) ? 'II' : 'I';
 }
-const RE_TIEU_DE = /ph[âa]n\s+ph[ốo]i\s+ch[ươuo]+ng\s+tr[ìi]nh\s*(?:m[ôo]n\s*)?[:\-–]?\s*(.+)/i;
+const RE_TIEU_DE = /(?:ph[âa]n\s+ph[ốo]i\s+ch[ươuo]+ng\s+tr[ìi]nh|k[ếe]\s+ho[ạa]ch\s+d[ạa]y\s+h[ọo]c)\s*(?:m[ôo]n\s*)?[:\-–]?\s*(.+)/i;
 function timCot(L) {
-  const a = L.map(boDau);
+  const a = L.map(x => boDau(x).replace(/\(\s*\d+\s*\)/g, ' ').replace(/[()\[\].:*]/g, ' ').replace(/\s+/g, ' ').trim());
   const f = fn => a.findIndex(fn);
   const tiet = f(t => /^(tiet|tiet so|tiet thu|tiet ppct|so tiet ppct|thu tu tiet|tiet theo ppct|ppct|stt tiet)$/.test(t) || /^tiet (so|thu|ppct)\b/.test(t));
   const soTiet = f(t => /^so tiet$/.test(t));
   const ten = f(t => /(ten bai|bai hoc|bai day|noi dung|ten chu de|^bai$|chu de\/bai)/.test(t) && !/yeu cau|so tiet/.test(t));
-  const tuan = f(t => /^tuan\b/.test(t));
+  const tuan = f(t => /^(tuan|thoi diem)\b/.test(t));
   const ghiChu = f(t => /ghi chu/.test(t));
   const chuDe = f(t => /^(chu de|chuong|mach noi dung|chuong\/chu de|chu de\/chuong)$/.test(t));
   const hk = f(t => /^(hoc ky|hoc ki|hk)$/.test(t));
@@ -1294,18 +1335,22 @@ const moRong = r => { const L = []; (r || []).forEach(c => { L.push((c && c.text
 function tenMonTuTieuDe(t) {
   t = String(t || '').replace(/n[ăa]m\s+h[ọo]c.*$/i, '').replace(/[.:]+$/, '').trim();
   if (!t) return '';
-  const low = t.toLocaleLowerCase('vi');
-  return low.charAt(0).toLocaleUpperCase('vi') + low.slice(1);
+  const low = t.toLocaleLowerCase('vi').replace(/^m[ôo]n\s+/, '').replace(/[\s,\-–]+(?:(?:kh[ốo]i|l[ớo]p)\s*)+(\d{1,2})\s*$/, ' $1');
+  return chuanTenMon(low);
 }
 /** blocks: [{type:'p',text} | {type:'tbl',rows:[[{text,span}]]}] */
 function phanTichPPCT(blocks, tenFile = '') {
   const hk2 = CFG().hk2TuTuan;
   let tieuDe = '', tongTieuDe = null, cot = null, hocKy = '', chuDe = '', dem = 0, chuanHoa = 0;
-  const bai = [];
+  const bai = [], hkTong = {};
   const xetTieuDe = txt => {
     const t = String(txt || '').replace(/\s+/g, ' ').trim(); if (!t) return;
     const m = t.match(RE_TIEU_DE); if (m && !tieuDe) tieuDe = m[1].trim();
-    const m2 = boDau(t).match(/ca nam.*?=\s*(\d+)\s*tiet/); if (m2 && tongTieuDe == null) tongTieuDe = +m2[1];
+    const a = boDau(t);
+    const m2 = a.match(/ca nam.*?=\s*(\d+)\s*tiet/) || a.match(/thoi luong\s*:?\s*(\d+)\s*tiet/) || a.match(/(\d+)\s*tiet\s*\/\s*nam/);
+    if (m2 && tongTieuDe == null) tongTieuDe = +m2[1];
+    const m3 = a.match(/(?:hoc ky|hoc ki|hk)\s*(ii|i|2|1)\b[^=|]*?[=|]\s*(\d+)\s*tiet/);   // "Học kỳ I. … = 18 tiết" hoặc bảng "Học kì I | 18 tiết"
+    if (m3) { const k = /ii|2/.test(m3[1]) ? 'II' : 'I'; if (hkTong[k] == null) hkTong[k] = +m3[2]; }
   };
   for (const b of blocks) {
     if (b.type === 'p') {
@@ -1319,7 +1364,7 @@ function phanTichPPCT(blocks, tenFile = '') {
       const L = moRong(r); const khac = [...new Set(L.filter(Boolean))];
       if (!khac.length) continue;
       const hd = timCot(L); if (hd) { cot = hd; continue; }
-      if (!cot) { khac.forEach(xetTieuDe); continue; }
+      if (!cot) { khac.forEach(xetTieuDe); xetTieuDe(khac.join(' | ')); continue; }
       const tietTxt = cot.tiet >= 0 ? (L[cot.tiet] || '') : '';
       let so = RE_SO.test(boDau(tietTxt)) ? tachSo(tietTxt) : [];
       const ten = (L[cot.ten] || '').trim();
@@ -1340,7 +1385,7 @@ function phanTichPPCT(blocks, tenFile = '') {
       so.forEach((t, k) => {
         let tenK = ten.replace(/\s+/g, ' ');
         if (laDem && so.length > 1) tenK += ` (tiết ${k + 1}/${so.length})`;
-        const ch = chuanHoaTen(tenK); if (ch !== tenK) chuanHoa++;
+        const ch = boInHoa(chuanHoaTen(tenK)); if (ch !== tenK) chuanHoa++;
         bai.push({ tiet: t, tuan: tuanArr.length === so.length ? tuanArr[k] : (tuanArr[0] ?? null), hocKy, chuDe, ten: ch, ghiChu: cot.ghiChu >= 0 ? (L[cot.ghiChu] || '') : '' });
       });
       dem = Math.max(dem, ...so);
@@ -1350,11 +1395,18 @@ function phanTichPPCT(blocks, tenFile = '') {
   const maxT = bai.length ? bai[bai.length - 1].tiet : 0;
   bai.forEach(x => { if (!x.hocKy) x.hocKy = x.tuan ? (x.tuan >= hk2 ? 'II' : 'I') : (x.tiet <= Math.ceil(maxT * 18 / 35) ? 'I' : 'II'); });
   let ten = tenMonTuTieuDe(tieuDe);
-  if (!ten) ten = String(tenFile).replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').replace(/^ppct\s*/i, '').trim();
-  const khoi = (ten.match(/(\d{1,2})\s*$/) || tieuDe.match(/(\d{1,2})\b/) || [])[1] || '';
-  return { ten, khoi, bai, tongTieuDe, chuanHoa, coBang: !!cot };
+  if (!ten) ten = tenMonTuFile(tenFile);
+  let khoi = (ten.match(/(\d{1,2})$/) || tieuDe.match(/(?:l[ớo]p|kh[ốo]i)\s*(\d{1,2})\b/i) || [])[1] || '';
+  if (!(+khoi >= 1 && +khoi <= 12)) khoi = '';
+  return { ten, khoi, bai, tongTieuDe, hkTong, chuanHoa, coBang: !!cot, tenTuFile: !tieuDe };
 }
-function kiemTraPPCT(bai, tongTieuDe) {
+/** Phần tên bài dùng để so các tiết của cùng một bài: bỏ (T1), (TT), – Tiết 2, dấu chấm cuối; coi mọi loại gạch ngang là một */
+function gocTenBai(s) {
+  let t = String(s || '').trim();
+  for (let i = 0; i < 3; i++) t = t.replace(/\s*[.;,]+\s*$/, '').replace(/\s*[(\[]\s*(tt|tiếp theo|tiếp|t\s*\d+|tiết\s*\d+[^)\]]*)\s*[)\]]\s*$/i, '').replace(/\s*[–—-]\s*tiết\s*\d+(\s*\/\s*\d+)?\s*$/i, '').trim();
+  return t;
+}
+function kiemTraPPCT(bai, tongTieuDe, hkTong) {
   const cb = [];
   const dem = new Map(); bai.forEach(b => dem.set(b.tiet, (dem.get(b.tiet) || 0) + 1));
   const trung = [...dem].filter(([, v]) => v > 1).map(([k]) => k);
@@ -1365,13 +1417,19 @@ function kiemTraPPCT(bai, tongTieuDe) {
   if (tongTieuDe && tongTieuDe !== bai.length) cb.push({ muc: 'warn', nd: `Tiêu đề ghi cả năm ${tongTieuDe} tiết nhưng bảng có ${bai.length} tiết` });
   const nhom = new Map();
   bai.forEach(b => {
-    const m = b.ten.match(/^B[àa]i\s*(\d+)\s*[.:\-–]?\s*(.*)$/i); if (!m) return;
-    const goc = m[2].replace(/\s*\((tt|tiếp theo|tiếp|tiết\s*\d+[^)]*)\)\s*$/i, '').trim();
-    if (!nhom.has(m[1])) nhom.set(m[1], []); nhom.get(m[1]).push({ tiet: b.tiet, goc });
+    const m = b.ten.match(/^B[àa]i\s*(\d+[a-zđ]?)\s*[.:\-–]?\s*(.*)$/i); if (!m) return;
+    const goc = gocTenBai(m[2]);
+    const k = m[1].toLowerCase(); if (!nhom.has(k)) nhom.set(k, []); nhom.get(k).push({ tiet: b.tiet, goc });
   });
+  const soKhop = s => boDau(s).replace(/[–—-]/g, '-').replace(/\s*-\s*/g, ' - ').replace(/\s+/g, ' ');
   for (const [k, arr] of nhom) {
-    if (new Set(arr.map(x => boDau(x.goc))).size > 1) cb.push({ muc: 'warn', nd: `Bài ${k} có tên không thống nhất: ` + arr.map(x => `tiết ${x.tiet} “${x.goc}”`).join(' · ') });
+    if (new Set(arr.map(x => soKhop(x.goc))).size > 1) cb.push({ muc: 'warn', nd: `Bài ${k} có tên không thống nhất: ` + arr.map(x => `tiết ${x.tiet} “${x.goc}”`).join(' · ') });
   }
+  if (hkTong) ['I', 'II'].forEach(k => { const n = bai.filter(b => b.hocKy === k).length; if (hkTong[k] != null && n && n !== hkTong[k]) cb.push({ muc: 'warn', nd: `Học kỳ ${k}: phần đầu file ghi ${hkTong[k]} tiết nhưng bảng có ${n} tiết` }); });
+  bai.forEach(b => {
+    const m = boDau(b.ten).match(/\b(giua|cuoi)\s+(hoc\s+)?k[yi]\s+(ii|i)\b/);
+    if (m && b.hocKy && (m[3] === 'ii' ? 'II' : 'I') !== b.hocKy) cb.push({ muc: 'warn', nd: `Tiết ${b.tiet} thuộc học kỳ ${b.hocKy} nhưng tên bài ghi “${b.ten}” — có thể gõ nhầm học kỳ` });
+  });
   let truoc = 0;
   for (const b of bai) { if (b.tuan && b.tuan < truoc) { cb.push({ muc: 'warn', nd: `Cột tuần không tăng dần ở tiết ${b.tiet} (tuần ${b.tuan} sau tuần ${truoc})` }); break; } if (b.tuan) truoc = b.tuan; }
   const rong = bai.filter(b => !b.ten).map(b => b.tiet); if (rong.length) cb.push({ muc: 'err', nd: `Tiết chưa có tên bài: ${rong.join(', ')}` });
@@ -2387,22 +2445,57 @@ function bangPPCT(bai) {
   });
   return `<div class="tbl-wrap" style="max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:var(--r-sm)"><table class="tbl ppct-table"><thead><tr><th class="c">Tiết</th><th class="c">Tuần</th><th class="c">HK</th><th>Tên bài</th><th>Ghi chú</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
+/** So tên môn không phân biệt dấu, chữ "lớp", "khối", "môn": "Tin học lớp 9" ≡ "Tin học 9" */
+const khoaMon = s => boDau(s).replace(/\b(mon|lop|khoi)\b/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
+const gocMon = s => khoaMon(s).replace(/\s*\d+$/, '').trim();
+/** Môn đã có ứng với PPCT vừa đọc: cùng tên, hoặc môn đang phân công cho khối đó có cùng tên gốc (Tin học 8 ↔ Tin học 8) */
+function timMonTrung(ten, khoi) {
+  const k = khoaMon(ten);
+  let m = DB.mon.find(x => khoaMon(x.ten) === k || x.id === slug(ten));
+  if (m) return m.id;
+  const pc = khoi && CFG().phanCong.khoi[khoi], mp = pc && monTheoId(pc);
+  if (mp && gocMon(mp.ten) === gocMon(ten)) return mp.id;
+  m = DB.mon.find(x => khoi && String(x.khoi) === String(khoi) && gocMon(x.ten) === gocMon(ten));
+  return m ? m.id : '';
+}
 function moXemTruocPPCT(kq, tenFile, idThay) {
-  const cb = kiemTraPPCT(kq.bai, kq.tongTieuDe);
-  const trung = idThay || (DB.mon.find(m => m.id === slug(kq.ten) || boDau(m.ten) === boDau(kq.ten)) || {}).id || '';
+  const cb = kiemTraPPCT(kq.bai, kq.tongTieuDe, kq.hkTong);
+  const trung = idThay || timMonTrung(kq.ten, kq.khoi);
   const hk1 = kq.bai.filter(b => b.hocKy === 'I').length, hk2 = kq.bai.filter(b => b.hocKy === 'II').length;
   const soCD = new Set(kq.bai.map(b => b.chuDe).filter(Boolean)).size;
   const html = `<div class="grid-3">
       <label class="fld"><span>Tên môn</span><input id="pp-ten" value="${esc(kq.ten)}"></label>
       <label class="fld"><span>Khối</span><input id="pp-khoi" value="${esc(kq.khoi)}" inputmode="numeric"></label>
-      <label class="fld"><span>Lưu vào</span><select id="pp-dich"><option value="__moi">Môn mới</option>${DB.mon.map(m => `<option value="${esc(m.id)}" ${m.id === trung ? 'selected' : ''}>Thay PPCT của: ${esc(m.ten)}</option>`).join('')}</select></label></div>
-    <div class="row"><span class="pill p-info">${kq.bai.length} tiết</span><span class="pill p-muted">HK I: ${hk1} · HK II: ${hk2}</span>${soCD ? `<span class="pill p-muted">${soCD} chủ đề</span>` : ''}${kq.tongTieuDe ? `<span class="pill ${kq.tongTieuDe === kq.bai.length ? 'p-ok' : 'p-warn'}">Tiêu đề: ${kq.tongTieuDe} tiết</span>` : ''}${kq.chuanHoa ? `<span class="pill p-muted">Đã chuẩn hóa khoảng trắng ${kq.chuanHoa} tên bài</span>` : ''}</div>
+      <label class="fld"><span>Lưu vào</span><select id="pp-dich"><option value="__moi">Môn mới</option>${DB.mon.map(m => `<option value="${esc(m.id)}" ${m.id === trung ? 'selected' : ''}>${esc(m.ten)}${m.bai.length ? ` (thay ${m.bai.length} tiết đang có)` : ' (chưa có PPCT)'}</option>`).join('')}</select></label></div>
+    <label class="chk" id="pp-gan-wrap"><input type="checkbox" id="pp-gan"> <span id="pp-gan-nhan"></span></label>
+    ${kq.tenTuFile ? `<div class="callout info">${ic('info')}<div>File không có dòng tiêu đề “Phân phối chương trình môn …” nên tên môn và khối được lấy từ tên file <b>${esc(tenFile)}</b>. Kiểm tra lại hai ô trên.</div></div>` : ''}
+    <div class="row"><span class="pill p-info">${kq.bai.length} tiết</span><span class="pill p-muted">HK I: ${hk1} · HK II: ${hk2}</span>${soCD ? `<span class="pill p-muted">${soCD} chủ đề</span>` : ''}${kq.tongTieuDe ? `<span class="pill ${kq.tongTieuDe === kq.bai.length ? 'p-ok' : 'p-warn'}">Tiêu đề: ${kq.tongTieuDe} tiết</span>` : ''}${kq.chuanHoa ? `<span class="pill p-muted">Đã chuẩn hóa ${kq.chuanHoa} tên bài (khoảng trắng, chữ in hoa)</span>` : ''}</div>
     ${cb.map(x => `<div class="callout ${x.muc === 'err' ? 'err' : 'warn'}">${ic('alert')}<div>${esc(x.nd)}</div></div>`).join('') || `<div class="callout ok">${ic('check')}<div>Không phát hiện lỗi: số tiết liên tục, tên bài thống nhất.</div></div>`}
     ${bangPPCT(kq.bai)}`;
   moModal({
-    tieuDe: 'Xem trước PPCT từ ' + tenFile, noiDung: html, co: 'mid', nut: [{ nhan: 'Hủy' }, {
+    tieuDe: 'Xem trước PPCT từ ' + tenFile, noiDung: html, co: 'mid',
+    onMo: w => {
+      const cbx = $('#pp-gan', w);
+      // Dòng "Dùng PPCT này cho các lớp khối N": tự đánh dấu khi khối chưa có môn, môn của khối chưa có PPCT, hoặc cùng tên môn
+      const veGan = lanDau => {
+        const khoi = $('#pp-khoi', w).value.trim(), dich = $('#pp-dich', w).value;
+        if (!/^\d{1,2}$/.test(khoi)) { $('#pp-gan-wrap', w).hidden = true; cbx.checked = false; return; }
+        $('#pp-gan-wrap', w).hidden = false;
+        const hien = CFG().phanCong.khoi[khoi], mHien = hien && monTheoId(hien), laNo = !!hien && hien === dich;
+        $('#pp-gan-nhan', w).innerHTML = laNo ? `Các lớp khối <b>${esc(khoi)}</b> đang dùng môn này` : `Dùng PPCT này cho các lớp khối <b>${esc(khoi)}</b>` + (mHien ? ` <span class="muted">(thay cho ${esc(mHien.ten)}${mHien.bai.length ? ', ' + mHien.bai.length + ' tiết' : ', chưa có PPCT'})</span>` : '');
+        cbx.disabled = laNo;
+        if (laNo) cbx.checked = true;
+        else if (lanDau || !cbx.dataset.suaTay) cbx.checked = !hien || !mHien || !mHien.bai.length || gocMon(mHien.ten) === gocMon($('#pp-ten', w).value);
+      };
+      cbx.addEventListener('change', () => { cbx.dataset.suaTay = '1'; });
+      ['#pp-ten', '#pp-khoi'].forEach(sel => $(sel, w).addEventListener('input', () => veGan(false)));
+      $('#pp-dich', w).addEventListener('change', () => veGan(false));
+      veGan(true);
+    },
+    nut: [{ nhan: 'Hủy' }, {
       nhan: 'Lưu PPCT', loai: 'primary', icon: 'save', onClick: async w => {
         const ten = $('#pp-ten', w).value.trim(); const khoi = $('#pp-khoi', w).value.trim(); const dich = $('#pp-dich', w).value;
+        const gan = $('#pp-gan', w).checked && /^\d{1,2}$/.test(khoi);
         if (!ten) { toast('Nhập tên môn.', 'err'); return false; }
         let id = dich;
         if (dich === '__moi') { id = slug(ten); let k = 2; while (monTheoId(id)) id = slug(ten) + '-' + k++; }
@@ -2411,11 +2504,12 @@ function moXemTruocPPCT(kq, tenFile, idThay) {
         await luuMon(mon, cu);
         const thayDoi = cu ? soSanhPPCT(cu.bai, mon.bai) : [];
         await ghiLog('ppct', `${cu ? 'Nhập lại' : 'Nhập'} PPCT ${ten} (${mon.bai.length} tiết) từ ${tenFile}${cu ? ' · ' + thayDoi.length + ' tiết thay đổi' : ''}`, { mon: id, soTiet: mon.bai.length, canhBao: cb.map(x => x.nd), thayDoi: thayDoi.slice(0, 60) });
-        if (khoi && !CFG().phanCong.khoi[khoi]) {
+        const truocKhoi = CFG().phanCong.khoi[khoi] || '';
+        if (gan && truocKhoi !== id) {
           const c = clone(DB.config || {}); c.phanCong = CFG().phanCong; c.phanCong.khoi[khoi] = id; DB.config = c; daThayDoi(); await luu('config', c);
-          await ghiLog('ppct', `Phân công: khối ${khoi} → ${ten}`, { khoi, mon: id });
+          await ghiLog('ppct', `Phân công: khối ${khoi} → ${ten}${truocKhoi ? ' (trước đây: ' + tenMon(truocKhoi) + ')' : ''}`, { khoi, mon: id, truoc: truocKhoi });
         }
-        render(); toast('Đã lưu PPCT ' + ten, 'ok');
+        render(); toast('Đã lưu PPCT ' + ten + (gan ? ' · áp dụng cho khối ' + khoi : ''), 'ok');
       }
     }]
   });
